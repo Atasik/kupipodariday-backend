@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { Offer } from './entities/offer.entity';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { User } from 'src/users/entities/user.entity';
 import { Wish } from 'src/wishes/entities/wish.entity';
 import { CreateOfferDto } from './dto/create-offer.dto';
@@ -14,6 +14,7 @@ const errZeroNegativeValue = 'Введите цену больше нуля';
 @Injectable()
 export class OffersService {
   constructor(
+    private dataSource: DataSource,
     @InjectRepository(Offer)
     private readonly offerRepo: Repository<Offer>,
     @InjectRepository(User)
@@ -23,25 +24,43 @@ export class OffersService {
   ) {}
 
   async create(input: CreateOfferDto, userId: number) {
-    const { itemId, amount } = input;
-    if (amount <= 0) throw new BadRequestException(errZeroNegativeValue);
-    const user = await this.userRepo.findOne({
-      where: { id: userId },
-    });
-    const wish = await this.wishRepo.findOne({
-      where: { id: itemId },
-      relations: ['owner'],
-    });
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
 
-    if (!wish) throw new BadRequestException(errWishNotExists);
-    if (wish.owner.id === user.id)
-      throw new BadRequestException(errYourOwnWish);
-    wish.raised += amount;
-    if (wish.raised > wish.price) throw new BadRequestException(errCupPrice);
+    try {
+      const { itemId, amount } = input;
+      if (amount <= 0) throw new BadRequestException(errZeroNegativeValue);
 
-    await this.wishRepo.save(wish);
+      const user = await queryRunner.manager.findOne(User, {
+        where: { id: userId },
+      });
 
-    return this.offerRepo.create({ ...input, user, item: wish });
+      const wish = await queryRunner.manager.findOne(Wish, {
+        where: { id: itemId },
+        relations: ['owner'],
+      });
+
+      if (!wish) throw new BadRequestException(errWishNotExists);
+      if (wish.owner.id === user.id)
+        throw new BadRequestException(errYourOwnWish);
+
+      wish.raised += amount;
+      if (wish.raised > wish.price) throw new BadRequestException(errCupPrice);
+
+      await queryRunner.manager.save(wish);
+
+      const offer = this.offerRepo.create({ ...input, user, item: wish });
+      await queryRunner.manager.save(offer);
+
+      await queryRunner.commitTransaction();
+      return offer;
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
   }
 
   findAll() {

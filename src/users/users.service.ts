@@ -75,7 +75,16 @@ export class UsersService {
     if (input.password) {
       input.password = await bcrypt.hash(input.password, 10);
     }
-    await this.userRepo.update(id, input);
+    try {
+      await this.userRepo.update(id, input);
+    } catch (err) {
+      if (err instanceof QueryFailedError) {
+        if (err.driverError.code === errExistsCode) {
+          throw new ConflictException(errUserExistsMessage);
+        }
+      }
+      return err;
+    }
     return this.findOne(id);
   }
 
